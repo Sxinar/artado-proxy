@@ -268,6 +268,49 @@ async function getBing(q: string, n: number): Promise<Results[]> {
     return results;
 }
 
+async function getYandex(q: string, n: number): Promise<Results[]> {
+    const limit = Math.max(1, Math.min(50, Number.isFinite(n) ? n : 10));
+    const cacheKey = `yandex:${q}:${limit}`;
+    const cached = cacheGet<Results[]>(cacheKey);
+    if (cached) return cached;
+
+    const results: Results[] = [];
+    const seenUrls = new Set<string>();
+
+    try {
+        const html = await requestWithRetry<string>(() => httpClient.get("https://yandex.com.tr/search/", {
+            params: { text: q, lr: 983, lang: "tr" },
+            headers: REQUEST_HEADERS
+        }));
+        const $ = load(html);
+
+        $(".serp-item").each((_, element) => {
+            if (results.length >= limit) return false;
+
+            const titleElement = $(element).find(".OrganicTitle-Link").first();
+            const title = titleElement.text().trim();
+            const url = titleElement.attr("href") || "";
+            const description = $(element).find(".OrganicText").first().text().trim();
+
+            if (!title || !url || !/^https?:\/\//i.test(url) || seenUrls.has(url)) return;
+
+            seenUrls.add(url);
+            results.push({
+                title,
+                description,
+                displayUrl: normalizeDisplayUrl(url),
+                url,
+                source: "Yandex TR"
+            });
+        });
+    } catch (error) {
+        console.error("Error fetching from Yandex Turkey:", (error as Error).message);
+    }
+
+    if (results.length) cacheSet(cacheKey, results);
+    return results;
+}
+
 function mergeResults(a: Results[], b: Results[]): Results[] {
     const map = new Map<string, Results>();
     for (const item of a) map.set(item.title, item);
@@ -459,6 +502,7 @@ async function getEngineStatuses(force = false): Promise<EngineStatus[]> {
     const entries = await Promise.all([
         checkEngine("Google (Web)", () => getGoogle("test", 3)),
         checkEngine("Bing (Web)", () => getBing("test", 3)),
+        checkEngine("Yandex TR (Web)", () => getYandex("test", 3)),
         checkEngine("Bing (Images)", () => getImages("test", 3)),
         checkEngine("Bing (News)", () => getNews("test", 3)),
         checkEngine("Bing (Videos)", () => getVideos("test", 3))
@@ -563,16 +607,21 @@ app.get("/api", async (req, res) => {
             case "bing":
                 results = await getBing(query, n);
                 break;
+            case "yandex":
+            case "turkey":
+                results = await getYandex(query, n);
+                break;
             case "all": {
-                const [google, bing] = await Promise.all([
+                const [google, bing, yandex] = await Promise.all([
                     getGoogle(query, n),
-                    getBing(query, n)
+                    getBing(query, n),
+                    getYandex(query, n)
                 ]);
-                results = mergeResults(google, bing);
+                results = mergeResults(mergeResults(google, bing), yandex);
                 break;
             }
             default:
-                return res.status(400).json({ error: "Invalid source. Use google, bing or all." });
+                return res.status(400).json({ error: "Invalid source. Use google, bing, yandex, turkey or all." });
         }
 
         res.setHeader('Content-Type', 'application/json; charset=UTF-8');
