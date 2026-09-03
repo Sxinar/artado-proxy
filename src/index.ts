@@ -231,27 +231,26 @@ async function getBing(q: string, n: number): Promise<Results[]> {
     if (cached) return cached;
 
     const results: Results[] = [];
+    const seenUrls = new Set<string>();
 
     try {
-        const xml = await requestWithRetry(() => httpClient.get("https://www.bing.com/search", {
-            params: { q, count: limit, format: "rss", ...BING_TR_PARAMS },
-            headers: REQUEST_HEADERS,
-            responseType: "arraybuffer"
+        const html = await requestWithRetry<string>(() => httpClient.get("https://www.bing.com/search", {
+            params: { q, count: limit, ...BING_TR_PARAMS },
+            headers: { ...REQUEST_HEADERS, Accept: "text/html,application/xhtml+xml" }
         }));
-        const decodedXml = iconv.decode(Buffer.from(xml as any), "utf-8");
+        const $ = load(html);
 
-        const $ = load(decodedXml, { xmlMode: true });
-
-        $("item").each((_, element) => {
+        $("li.b_algo").each((_, element) => {
             if (results.length >= limit) return false;
 
-            const title = $(element).find("title").first().text().trim();
-            const rawUrl = $(element).find("link").first().text().trim();
-            const description = $(element).find("description").first().text().trim();
-            const url = decodeBingRedirectUrl(rawUrl);
+            const link = $(element).find("h2 a").first();
+            const title = link.text().trim();
+            const url = decodeBingRedirectUrl(link.attr("href") || "");
+            const description = $(element).find(".b_caption p").first().text().trim();
 
-            if (!title || !url) return;
+            if (!title || !url || !/^https?:\/\//i.test(url) || seenUrls.has(url)) return;
 
+            seenUrls.add(url);
             results.push({
                 title,
                 description,
@@ -278,10 +277,15 @@ async function getYandex(q: string, n: number): Promise<Results[]> {
     const seenUrls = new Set<string>();
 
     try {
-        const html = await requestWithRetry<string>(() => httpClient.get("https://yandex.com.tr/search/", {
-            params: { text: q, lr: 983, lang: "tr" },
-            headers: REQUEST_HEADERS
-        }));
+        const pageCount = Math.ceil(limit / 10);
+        const pages = await Promise.all(Array.from({ length: pageCount }, (_, page) =>
+            requestWithRetry<string>(() => httpClient.get("https://yandex.com.tr/search/", {
+                params: { text: q, lr: 983, lang: "tr", p: page },
+                headers: REQUEST_HEADERS
+            }))
+        ));
+
+        const html = pages.join("\n");
         const $ = load(html);
 
         $(".serp-item").each((_, element) => {
