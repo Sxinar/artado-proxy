@@ -212,6 +212,14 @@ async function getGoogle(q: string, n: number): Promise<Results[]> {
         console.error("Error fetching from Startpage (Google):", (error as Error).message);
     }
 
+    if (!results.length) {
+        const fallbackResults = await getBing(q, limit);
+        results.push(...fallbackResults.map(result => ({
+            ...result,
+            source: "Google (fallback: Bing)"
+        })));
+    }
+
     if (results.length) cacheSet(cacheKey, results);
     return results;
 }

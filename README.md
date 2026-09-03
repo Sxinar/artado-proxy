@@ -5,6 +5,7 @@ Artado Proxy is an API that allows users to search the web more privately by sen
 ## Features
 
 - Web search via Google (Startpage proxy) and Bing
+- Google searches use Bing as a transparent fallback when Startpage returns a bot challenge.
 - Image search via Bing
 - News search via Bing News RSS
 - Video search via Bing Videos
