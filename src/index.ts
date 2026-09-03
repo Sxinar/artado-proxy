@@ -16,9 +16,38 @@ const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 50 });
 const httpClient = axios.create({
     httpAgent: keepAliveHttp,
     httpsAgent: keepAliveHttps,
-    timeout: 12000,
-    maxRedirects: 5
+    timeout: 10000,
+    maxRedirects: 3,
+    validateStatus: status => status >= 200 && status < 400
 });
+
+const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+async function requestWithRetry<T>(request: () => Promise<{ status: number; headers: any; data: T }>): Promise<T> {
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            const response = await request();
+            if (!RETRYABLE_STATUS_CODES.has(response.status) || attempt === maxAttempts) {
+                return response.data;
+            }
+
+            const retryAfter = Number.parseInt(String(response.headers["retry-after"] || ""), 10);
+            const delayMs = Number.isFinite(retryAfter)
+                ? Math.min(2000, retryAfter * 1000)
+                : 250 * 2 ** (attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+        } catch (error: any) {
+            const status = error?.response?.status;
+            const isRetryable = !status || RETRYABLE_STATUS_CODES.has(status);
+            if (!isRetryable || attempt === maxAttempts) throw error;
+            await new Promise(resolve => setTimeout(resolve, 250 * 2 ** (attempt - 1)));
+        }
+    }
+
+    throw new Error("Request failed after retries");
+}
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 interface CacheEntry { value: any; expiresAt: number; }
@@ -64,6 +93,7 @@ const requestCounter = (req: Request, res: Response, next: NextFunction) => {
 app.use(requestCounter);
 app.use(cors());
 app.use(bodyParser.json());
+app.use('/api', limiter);
 
 const REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -142,7 +172,7 @@ async function getGoogle(q: string, n: number): Promise<Results[]> {
     const seenUrls = new Set<string>();
 
     try {
-        const response = await httpClient.post(
+        const html = await requestWithRetry<string>(() => httpClient.post(
             "https://www.startpage.com/sp/search",
             new URLSearchParams({ q, num: String(limit) }).toString(),
             {
@@ -152,9 +182,7 @@ async function getGoogle(q: string, n: number): Promise<Results[]> {
                     "Referer": "https://www.startpage.com/"
                 }
             }
-        );
-
-        const html = response.data as string;
+        ));
         const $ = load(html);
 
         const cleanText = (el: any): string =>
@@ -197,14 +225,14 @@ async function getBing(q: string, n: number): Promise<Results[]> {
     const results: Results[] = [];
 
     try {
-        const response = await httpClient.get("https://www.bing.com/search", {
+        const xml = await requestWithRetry(() => httpClient.get("https://www.bing.com/search", {
             params: { q, count: limit, format: "rss", ...BING_TR_PARAMS },
             headers: REQUEST_HEADERS,
             responseType: "arraybuffer"
-        });
-        const xml = iconv.decode(Buffer.from(response.data), "utf-8");
+        }));
+        const decodedXml = iconv.decode(Buffer.from(xml as any), "utf-8");
 
-        const $ = load(xml, { xmlMode: true });
+        const $ = load(decodedXml, { xmlMode: true });
 
         $("item").each((_, element) => {
             if (results.length >= limit) return false;
@@ -249,7 +277,7 @@ async function getImages(q: string, n: number): Promise<ImageResult[]> {
     const results: ImageResult[] = [];
 
     try {
-        const response = await httpClient.post(
+        const html = await requestWithRetry<string>(() => httpClient.post(
             "https://www.startpage.com/sp/search",
             new URLSearchParams({ q, cat: "pics", num: String(limit) }).toString(),
             {
@@ -259,9 +287,7 @@ async function getImages(q: string, n: number): Promise<ImageResult[]> {
                     "Referer": "https://www.startpage.com/"
                 }
             }
-        );
-
-        const html = response.data as string;
+        ));
         const $ = load(html);
 
         $(".image-result").each((_, element) => {
@@ -304,14 +330,14 @@ async function getNews(q: string, n: number): Promise<NewsResult[]> {
     const results: NewsResult[] = [];
 
     try {
-        const response = await httpClient.get("https://www.bing.com/news/search", {
+        const xml = await requestWithRetry(() => httpClient.get("https://www.bing.com/news/search", {
             params: { q, count: limit, format: "rss", ...BING_TR_PARAMS },
             headers: REQUEST_HEADERS,
             responseType: "arraybuffer"
-        });
+        }));
 
-        const xml = iconv.decode(Buffer.from(response.data), "utf-8");
-        const $ = load(xml, { xmlMode: true });
+        const decodedXml = iconv.decode(Buffer.from(xml as any), "utf-8");
+        const $ = load(decodedXml, { xmlMode: true });
 
         $("item").each((_, element) => {
             if (results.length >= limit) return false;
@@ -356,12 +382,10 @@ async function getVideos(q: string, n: number): Promise<VideoResult[]> {
     const results: VideoResult[] = [];
 
     try {
-        const response = await httpClient.get("https://www.youtube.com/results", {
+        const html = await requestWithRetry<string>(() => httpClient.get("https://www.youtube.com/results", {
             params: { search_query: q },
             headers: REQUEST_HEADERS
-        });
-
-        const html = response.data as string;
+        }));
         const match = html.match(/var ytInitialData\s*=\s*(\{[\s\S]*?\});/);
         if (!match) {
             console.error("Could not find ytInitialData");
@@ -608,8 +632,6 @@ app.get("/api/videos", async (req, res) => {
     }
 });
 
-app.use('/api', limiter);
-
 app.get('/status', (req: Request, res: Response) => {
     const status = requestCount > REQUEST_THRESHOLD ? 'BUSY' : 'OK';
     res.send(status);
@@ -620,6 +642,9 @@ setInterval(() => {
     console.log('Request count reset to 0');
 }, RESET_INTERVAL);
 
-app.listen(3000, () => {
-    console.log("Server running on port 3000");
+const configuredPort = Number.parseInt(process.env.PORT || "3000", 10);
+const port = Number.isFinite(configuredPort) && configuredPort > 0 ? configuredPort : 3000;
+
+app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
 });

@@ -63,6 +63,8 @@ Artado Proxy is an API that allows users to search the web more privately by sen
 
    The proxy will be running at `http://localhost:3000`.
 
+   Hosted environments can provide a different port with the `PORT` environment variable.
+
 ## API Endpoints
 
 ### Web Search — `GET /api`
