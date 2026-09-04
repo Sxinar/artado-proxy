@@ -260,7 +260,7 @@ async function getGoogleCse(q: string, n: number): Promise<Results[]> {
 
     try {
         const token = await getGoogleCseToken();
-        const data = await requestWithRetry<any>(() => httpClient.get(
+        const response = await httpClient.get<any>(
             "https://cse.google.com/cse/element/v1",
             {
                 params: {
@@ -272,13 +272,15 @@ async function getGoogleCse(q: string, n: number): Promise<Results[]> {
                     cselibv: GOOGLE_CSE_LIB_VERSION,
                     q,
                     cx: GOOGLE_CSE_ID,
-                    cse_tok: token,
+                    cse_token: token,
                     safe: "off",
                     exp: GOOGLE_CSE_EXPERIMENTS.join()
                 },
-                headers: { ...REQUEST_HEADERS, Accept: "application/json" }
+                headers: { ...REQUEST_HEADERS, Accept: "application/json" },
+                timeout: 5000
             }
-        ));
+        );
+        const data = response.data;
 
         const seenUrls = new Set<string>();
         for (const item of data?.results || []) {
