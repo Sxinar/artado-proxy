@@ -101,6 +101,11 @@ const REQUEST_HEADERS = {
 };
 
 const BING_TR_PARAMS = { setlang: "tr", cc: "TR", mkt: "tr-TR" };
+const GOOGLE_CSE_ID = process.env.GOOGLE_CSE_ID || "160e826a9c5ebe821";
+const GOOGLE_CSE_LIB_VERSION = "e992cd4de3c7044f";
+const GOOGLE_CSE_EXPERIMENTS = ["csqr", "cc"];
+const GOOGLE_CSE_TOKEN_TTL_MS = 3 * 60 * 60 * 1000;
+let googleCseToken: { value: string; expiresAt: number } | null = null;
 
 function parseGoogleResultUrl(href: string): string {
     if (!href) return "";
@@ -218,6 +223,83 @@ async function getGoogle(q: string, n: number): Promise<Results[]> {
             ...result,
             source: "Google (fallback: Bing)"
         })));
+    }
+
+    if (results.length) cacheSet(cacheKey, results);
+    return results;
+}
+
+async function getGoogleCseToken(): Promise<string> {
+    if (googleCseToken && Date.now() < googleCseToken.expiresAt) {
+        return googleCseToken.value;
+    }
+
+    const script = await requestWithRetry<string>(() => httpClient.get(
+        "https://cse.google.com/cse.js",
+        { params: { cx: GOOGLE_CSE_ID }, headers: REQUEST_HEADERS }
+    ));
+    const tokenMatch = script.match(/"cse_token"\s*:\s*"([^"]+)"/);
+    if (!tokenMatch?.[1]) {
+        throw new Error("Google CSE token was not found");
+    }
+
+    googleCseToken = {
+        value: tokenMatch[1],
+        expiresAt: Date.now() + GOOGLE_CSE_TOKEN_TTL_MS
+    };
+    return googleCseToken.value;
+}
+
+async function getGoogleCse(q: string, n: number): Promise<Results[]> {
+    const limit = Math.max(1, Math.min(50, Number.isFinite(n) ? n : 10));
+    const cacheKey = `google-cse:${q}:${limit}`;
+    const cached = cacheGet<Results[]>(cacheKey);
+    if (cached) return cached;
+
+    const results: Results[] = [];
+
+    try {
+        const token = await getGoogleCseToken();
+        const data = await requestWithRetry<any>(() => httpClient.get(
+            "https://cse.google.com/cse/element/v1",
+            {
+                params: {
+                    rsz: "filtered_cse",
+                    num: limit,
+                    hl: "tr",
+                    source: "gcsc",
+                    gss: ".com",
+                    cselibv: GOOGLE_CSE_LIB_VERSION,
+                    q,
+                    cx: GOOGLE_CSE_ID,
+                    cse_tok: token,
+                    safe: "off",
+                    exp: GOOGLE_CSE_EXPERIMENTS.join()
+                },
+                headers: { ...REQUEST_HEADERS, Accept: "application/json" }
+            }
+        ));
+
+        const seenUrls = new Set<string>();
+        for (const item of data?.results || []) {
+            const title = typeof item?.title === "string" ? item.title.trim() : "";
+            const url = typeof item?.url === "string" ? item.url.trim() : "";
+            if (!title || !url || !/^https?:\/\//i.test(url) || seenUrls.has(url)) continue;
+
+            seenUrls.add(url);
+            results.push({
+                title,
+                description: typeof item.content === "string" ? item.content.trim() : "",
+                displayUrl: typeof item.visibleUrl === "string"
+                    ? item.visibleUrl.trim()
+                    : normalizeDisplayUrl(url),
+                url,
+                source: "Google CSE"
+            });
+            if (results.length >= limit) break;
+        }
+    } catch (error) {
+        console.error("Error fetching from Google CSE:", (error as Error).message);
     }
 
     if (results.length) cacheSet(cacheKey, results);
@@ -505,6 +587,7 @@ async function getEngineStatuses(force = false): Promise<EngineStatus[]> {
     }
     const entries = await Promise.all([
         checkEngine("Google (Web)", () => getGoogle("test", 3)),
+        checkEngine("Google CSE (Web)", () => getGoogleCse("test", 3)),
         checkEngine("Bing (Web)", () => getBing("test", 3)),
         checkEngine("Yandex TR (Web)", () => getYandex("test", 3)),
         checkEngine("Bing (Images)", () => getImages("test", 3)),
@@ -563,7 +646,7 @@ app.get("/", async (req, res) => {
     <div class="endpoints">
       <strong>API uç noktaları:</strong>
       <ul>
-        <li><code>GET /api?q=...&number=10&source=google|bing|all</code></li>
+        <li><code>GET /api?q=...&number=10&source=google|cse|bing|yandex|all</code></li>
         <li><code>GET /api/images?q=...&number=10</code></li>
         <li><code>GET /api/news?q=...&number=10</code></li>
         <li><code>GET /api/videos?q=...&number=10</code></li>
@@ -608,6 +691,10 @@ app.get("/api", async (req, res) => {
             case "google":
                 results = await getGoogle(query, n);
                 break;
+            case "cse":
+            case "google-cse":
+                results = await getGoogleCse(query, n);
+                break;
             case "bing":
                 results = await getBing(query, n);
                 break;
@@ -616,16 +703,17 @@ app.get("/api", async (req, res) => {
                 results = await getYandex(query, n);
                 break;
             case "all": {
-                const [google, bing, yandex] = await Promise.all([
+                const [google, cse, bing, yandex] = await Promise.all([
                     getGoogle(query, n),
+                    getGoogleCse(query, n),
                     getBing(query, n),
                     getYandex(query, n)
                 ]);
-                results = mergeResults(mergeResults(google, bing), yandex);
+                results = mergeResults(mergeResults(mergeResults(google, cse), bing), yandex);
                 break;
             }
             default:
-                return res.status(400).json({ error: "Invalid source. Use google, bing, yandex, turkey or all." });
+                return res.status(400).json({ error: "Invalid source. Use google, cse, bing, yandex, turkey or all." });
         }
 
         res.setHeader('Content-Type', 'application/json; charset=UTF-8');

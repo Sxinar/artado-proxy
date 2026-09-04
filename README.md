@@ -4,7 +4,7 @@ Artado Proxy is an API that allows users to search the web more privately by sen
 
 ## Features
 
-- Web search via Google (Startpage proxy), Bing and Yandex Turkey
+- Web search via Google (Startpage proxy), Google CSE, Bing and Yandex Turkey
 - Google searches use Bing as a transparent fallback when Startpage returns a bot challenge.
 - Image search via Bing
 - News search via Bing News RSS
@@ -78,12 +78,15 @@ http://localhost:3000/api?q={query}&number={count}&source={source}
 |-----------|----------|-------------|
 | `q` | ✅ | Search query |
 | `number` | ✅ | Number of results (1–50) |
-| `source` | ✅ | `google`, `bing`, `yandex`/`turkey`, or `all` |
+| `source` | ✅ | `google`, `cse`/`google-cse`, `bing`, `yandex`/`turkey`, or `all` |
 
 **Example:**
 ```
 http://localhost:3000/api?q=artado&number=10&source=google
 ```
+
+Google CSE can be selected with `source=cse`. Set `GOOGLE_CSE_ID` to override the
+default CSE identifier; the proxy refreshes the CSE token automatically.
 
 **Response fields:** `title`, `description`, `displayUrl`, `url`, `source`
 
