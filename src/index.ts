@@ -102,6 +102,7 @@ const REQUEST_HEADERS = {
 
 const BING_TR_PARAMS = { setlang: "tr", cc: "TR", mkt: "tr-TR" };
 const GOOGLE_CSE_ID = process.env.GOOGLE_CSE_ID || "160e826a9c5ebe821";
+const GOOGLE_CSE_API_KEY = process.env.GOOGLE_CSE_API_KEY;
 const GOOGLE_CSE_LIB_VERSION = "e992cd4de3c7044f";
 const GOOGLE_CSE_EXPERIMENTS = ["csqr", "cc"];
 const GOOGLE_CSE_TOKEN_TTL_MS = 3 * 60 * 60 * 1000;
@@ -217,14 +218,6 @@ async function getGoogle(q: string, n: number): Promise<Results[]> {
         console.error("Error fetching from Startpage (Google):", (error as Error).message);
     }
 
-    if (!results.length) {
-        const fallbackResults = await getBing(q, limit);
-        results.push(...fallbackResults.map(result => ({
-            ...result,
-            source: "Google (fallback: Bing)"
-        })));
-    }
-
     if (results.length) cacheSet(cacheKey, results);
     return results;
 }
@@ -259,41 +252,50 @@ async function getGoogleCse(q: string, n: number): Promise<Results[]> {
     const results: Results[] = [];
 
     try {
-        const token = await getGoogleCseToken();
+        const params = GOOGLE_CSE_API_KEY
+            ? { key: GOOGLE_CSE_API_KEY, cx: GOOGLE_CSE_ID, q, num: limit, hl: "tr", safe: "off" }
+            : {
+                rsz: "filtered_cse",
+                num: limit,
+                hl: "tr",
+                source: "gcsc",
+                gss: ".com",
+                cselibv: GOOGLE_CSE_LIB_VERSION,
+                q,
+                cx: GOOGLE_CSE_ID,
+                cse_token: await getGoogleCseToken(),
+                safe: "off",
+                exp: GOOGLE_CSE_EXPERIMENTS.join()
+            };
         const response = await httpClient.get<any>(
-            "https://cse.google.com/cse/element/v1",
+            GOOGLE_CSE_API_KEY
+                ? "https://www.googleapis.com/customsearch/v1"
+                : "https://cse.google.com/cse/element/v1",
             {
-                params: {
-                    rsz: "filtered_cse",
-                    num: limit,
-                    hl: "tr",
-                    source: "gcsc",
-                    gss: ".com",
-                    cselibv: GOOGLE_CSE_LIB_VERSION,
-                    q,
-                    cx: GOOGLE_CSE_ID,
-                    cse_token: token,
-                    safe: "off",
-                    exp: GOOGLE_CSE_EXPERIMENTS.join()
-                },
+                params,
                 headers: { ...REQUEST_HEADERS, Accept: "application/json" },
-                timeout: 5000
+                timeout: 3000
             }
         );
         const data = response.data;
 
         const seenUrls = new Set<string>();
-        for (const item of data?.results || []) {
+        const items = GOOGLE_CSE_API_KEY ? data?.items || [] : data?.results || [];
+        for (const item of items) {
             const title = typeof item?.title === "string" ? item.title.trim() : "";
-            const url = typeof item?.url === "string" ? item.url.trim() : "";
+            const url = typeof (item?.url || item?.link) === "string"
+                ? (item.url || item.link).trim()
+                : "";
             if (!title || !url || !/^https?:\/\//i.test(url) || seenUrls.has(url)) continue;
 
             seenUrls.add(url);
             results.push({
                 title,
-                description: typeof item.content === "string" ? item.content.trim() : "",
-                displayUrl: typeof item.visibleUrl === "string"
-                    ? item.visibleUrl.trim()
+                description: typeof (item.content || item.snippet) === "string"
+                    ? (item.content || item.snippet).trim()
+                    : "",
+                displayUrl: typeof (item.visibleUrl || item.displayLink) === "string"
+                    ? (item.visibleUrl || item.displayLink).trim()
                     : normalizeDisplayUrl(url),
                 url,
                 source: "Google CSE"
@@ -302,49 +304,6 @@ async function getGoogleCse(q: string, n: number): Promise<Results[]> {
         }
     } catch (error) {
         console.error("Error fetching from Google CSE:", (error as Error).message);
-    }
-
-    if (results.length) cacheSet(cacheKey, results);
-    return results;
-}
-
-async function getBing(q: string, n: number): Promise<Results[]> {
-    const limit = Math.max(1, Math.min(50, Number.isFinite(n) ? n : 10));
-    const cacheKey = `bing:${q}:${limit}`;
-    const cached = cacheGet<Results[]>(cacheKey);
-    if (cached) return cached;
-
-    const results: Results[] = [];
-    const seenUrls = new Set<string>();
-
-    try {
-        const html = await requestWithRetry<string>(() => httpClient.get("https://www.bing.com/search", {
-            params: { q, count: limit, ...BING_TR_PARAMS },
-            headers: { ...REQUEST_HEADERS, Accept: "text/html,application/xhtml+xml" }
-        }));
-        const $ = load(html);
-
-        $("li.b_algo").each((_, element) => {
-            if (results.length >= limit) return false;
-
-            const link = $(element).find("h2 a").first();
-            const title = link.text().trim();
-            const url = decodeBingRedirectUrl(link.attr("href") || "");
-            const description = $(element).find(".b_caption p").first().text().trim();
-
-            if (!title || !url || !/^https?:\/\//i.test(url) || seenUrls.has(url)) return;
-
-            seenUrls.add(url);
-            results.push({
-                title,
-                description,
-                displayUrl: normalizeDisplayUrl(url),
-                url,
-                source: "Bing"
-            });
-        });
-    } catch (error) {
-        console.error("Error fetching from Bing:", (error as Error).message);
     }
 
     if (results.length) cacheSet(cacheKey, results);
@@ -590,7 +549,6 @@ async function getEngineStatuses(force = false): Promise<EngineStatus[]> {
     const entries = await Promise.all([
         checkEngine("Google (Web)", () => getGoogle("test", 3)),
         checkEngine("Google CSE (Web)", () => getGoogleCse("test", 3)),
-        checkEngine("Bing (Web)", () => getBing("test", 3)),
         checkEngine("Yandex TR (Web)", () => getYandex("test", 3)),
         checkEngine("Bing (Images)", () => getImages("test", 3)),
         checkEngine("Bing (News)", () => getNews("test", 3)),
@@ -648,7 +606,7 @@ app.get("/", async (req, res) => {
     <div class="endpoints">
       <strong>API uç noktaları:</strong>
       <ul>
-        <li><code>GET /api?q=...&number=10&source=google|cse|bing|yandex|all</code></li>
+        <li><code>GET /api?q=...&number=10&source=google|cse|yandex|all</code></li>
         <li><code>GET /api/images?q=...&number=10</code></li>
         <li><code>GET /api/news?q=...&number=10</code></li>
         <li><code>GET /api/videos?q=...&number=10</code></li>
@@ -697,25 +655,21 @@ app.get("/api", async (req, res) => {
             case "google-cse":
                 results = await getGoogleCse(query, n);
                 break;
-            case "bing":
-                results = await getBing(query, n);
-                break;
             case "yandex":
             case "turkey":
                 results = await getYandex(query, n);
                 break;
             case "all": {
-                const [google, cse, bing, yandex] = await Promise.all([
+                const [google, cse, yandex] = await Promise.all([
                     getGoogle(query, n),
                     getGoogleCse(query, n),
-                    getBing(query, n),
                     getYandex(query, n)
                 ]);
-                results = mergeResults(mergeResults(mergeResults(google, cse), bing), yandex);
+                results = mergeResults(mergeResults(google, cse), yandex);
                 break;
             }
             default:
-                return res.status(400).json({ error: "Invalid source. Use google, cse, bing, yandex, turkey or all." });
+                return res.status(400).json({ error: "Invalid source. Use google, cse, yandex, turkey or all." });
         }
 
         res.setHeader('Content-Type', 'application/json; charset=UTF-8');
