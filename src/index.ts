@@ -102,29 +102,6 @@ const REQUEST_HEADERS = {
 };
 
 const BING_TR_PARAMS = { setlang: "tr", cc: "TR", mkt: "tr-TR" };
-const GOOGLE_CSE_ID = process.env.GOOGLE_CSE_ID || "160e826a9c5ebe821";
-const GOOGLE_CSE_API_KEY = process.env.GOOGLE_CSE_API_KEY;
-const GOOGLE_CSE_LIB_VERSION = "e992cd4de3c7044f";
-const GOOGLE_CSE_EXPERIMENTS = ["csqr", "cc"];
-const GOOGLE_CSE_TOKEN_TTL_MS = 3 * 60 * 60 * 1000;
-let googleCseToken: { value: string; expiresAt: number } | null = null;
-
-function parseGoogleResultUrl(href: string): string {
-    if (!href) return "";
-    if (href.startsWith("/url?q=")) {
-        const raw = href.slice("/url?q=".length).split("&")[0];
-        try {
-            return decodeURIComponent(raw);
-        } catch {
-            return raw;
-        }
-    }
-    if (href.startsWith("http://") || href.startsWith("https://")) {
-        return href;
-    }
-    return "";
-}
-
 function normalizeDisplayUrl(url: string): string {
     try {
         const parsed = new URL(url);
@@ -217,102 +194,6 @@ async function getGoogle(q: string, n: number): Promise<Results[]> {
 
     } catch (error) {
         console.error("Error fetching from Startpage (Google):", (error as Error).message);
-    }
-
-    if (results.length) cacheSet(cacheKey, results);
-    return results;
-}
-
-async function getGoogleCseToken(): Promise<string> {
-    if (googleCseToken && Date.now() < googleCseToken.expiresAt) {
-        return googleCseToken.value;
-    }
-
-    const response = await httpClient.get<string>(
-        "https://cse.google.com/cse.js",
-        { params: { cx: GOOGLE_CSE_ID }, headers: REQUEST_HEADERS, timeout: 2500 }
-    );
-    const script = response.data;
-    const tokenMatch = script.match(/"cse_token"\s*:\s*"([^"]+)"/);
-    if (!tokenMatch?.[1]) {
-        throw new Error("Google CSE token was not found");
-    }
-
-    googleCseToken = {
-        value: tokenMatch[1],
-        expiresAt: Date.now() + GOOGLE_CSE_TOKEN_TTL_MS
-    };
-    return googleCseToken.value;
-}
-
-async function getGoogleCse(q: string, n: number): Promise<Results[]> {
-    const limit = Math.max(1, Math.min(50, Number.isFinite(n) ? n : 10));
-    const cacheKey = `google-cse:${q}:${limit}`;
-    const cached = cacheGet<Results[]>(cacheKey);
-    if (cached) return cached;
-
-    const results: Results[] = [];
-
-    try {
-        const params = GOOGLE_CSE_API_KEY
-            ? { key: GOOGLE_CSE_API_KEY, cx: GOOGLE_CSE_ID, q, num: limit, hl: "tr", safe: "off" }
-            : {
-                rsz: "filtered_cse",
-                num: limit,
-                hl: "tr",
-                key: "notsupplied",
-                v: "1",
-                source: "gcsc",
-                gss: ".com",
-                cselibv: GOOGLE_CSE_LIB_VERSION,
-                q,
-                cx: GOOGLE_CSE_ID,
-                cse_tok: await getGoogleCseToken(),
-                safe: "off",
-                exp: GOOGLE_CSE_EXPERIMENTS.join()
-            };
-        const response = await httpClient.get<any>(
-            GOOGLE_CSE_API_KEY
-                ? "https://www.googleapis.com/customsearch/v1"
-                : "https://cse.google.com/cse/element/v1",
-            {
-                params,
-                headers: {
-                    ...REQUEST_HEADERS,
-                    Accept: "application/json",
-                    Referer: "https://cse.google.com/",
-                    Origin: "https://cse.google.com"
-                },
-                timeout: 3000
-            }
-        );
-        const data = response.data;
-
-        const seenUrls = new Set<string>();
-        const items = GOOGLE_CSE_API_KEY ? data?.items || [] : data?.results || [];
-        for (const item of items) {
-            const title = typeof item?.title === "string" ? item.title.trim() : "";
-            const url = typeof (item?.url || item?.link) === "string"
-                ? (item.url || item.link).trim()
-                : "";
-            if (!title || !url || !/^https?:\/\//i.test(url) || seenUrls.has(url)) continue;
-
-            seenUrls.add(url);
-            results.push({
-                title,
-                description: typeof (item.content || item.snippet) === "string"
-                    ? (item.content || item.snippet).trim()
-                    : "",
-                displayUrl: typeof (item.visibleUrl || item.displayLink) === "string"
-                    ? (item.visibleUrl || item.displayLink).trim()
-                    : normalizeDisplayUrl(url),
-                url,
-                source: "Google CSE"
-            });
-            if (results.length >= limit) break;
-        }
-    } catch (error) {
-        console.error("Error fetching from Google CSE:", (error as Error).message);
     }
 
     if (results.length) cacheSet(cacheKey, results);
@@ -580,7 +461,6 @@ async function getEngineStatuses(force = false): Promise<EngineStatus[]> {
     }
     const entries = await Promise.all([
         checkEngine("Google (Web)", () => getGoogle("test", 3)),
-        checkEngine("Google CSE (Web)", () => getGoogleCse("test", 3)),
         checkEngine("Yandex TR (Web)", () => getYandex("test", 3)),
         checkEngine("Bing (Images)", () => getImages("test", 3)),
         checkEngine("Bing (News)", () => getNews("test", 3)),
@@ -607,21 +487,20 @@ app.get("/", async (req, res) => {
 <title>Artado Proxy — Hızlı ve Özel Arama</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  :root { color-scheme: dark; --bg:#080b14; --panel:#111827; --line:#243047; --muted:#94a3b8; --accent:#8b5cf6; --cyan:#22d3ee; }
-  * { box-sizing: border-box; } body { margin:0; min-height:100vh; font-family:Inter,ui-sans-serif,Segoe UI,sans-serif; color:#f8fafc; background:radial-gradient(circle at 15% 0%,#1e1b4b 0,transparent 38%),var(--bg); }
-  .wrap { max-width:1060px; margin:0 auto; padding:56px 22px 36px; } .hero { text-align:center; padding:38px 0 48px; }
-  .logo { display:inline-flex; align-items:center; gap:10px; font-weight:800; letter-spacing:-.04em; font-size:1.05rem; color:#c4b5fd; }
-  .logo i { width:34px; height:34px; display:grid; place-items:center; border-radius:11px; background:linear-gradient(135deg,var(--accent),var(--cyan)); color:white; font-style:normal; }
-  h1 { margin:18px 0 10px; font-size:clamp(2.2rem,6vw,4.5rem); letter-spacing:-.07em; line-height:1; } .lead { margin:0 auto; max-width:560px; color:var(--muted); font-size:1.05rem; }
-  .search { margin:30px auto 0; max-width:700px; display:flex; gap:10px; padding:8px; border:1px solid #384362; background:#111827cc; border-radius:16px; box-shadow:0 14px 50px #0005; }
-  input,select,button { border:0; border-radius:10px; font:inherit; } input { flex:1; min-width:0; padding:13px 14px; color:white; background:transparent; outline:none; } select { padding:0 10px; color:#cbd5e1; background:#1e293b; } button { padding:0 20px; color:white; cursor:pointer; background:linear-gradient(135deg,var(--accent),#6366f1); font-weight:700; }
-  .summary { display:flex; justify-content:space-between; gap:16px; align-items:center; margin:0 0 16px; padding:15px 18px; border:1px solid var(--line); border-radius:14px; background:#111827cc; color:#cbd5e1; } .summary strong { color:white; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; } .engine { padding:17px; border:1px solid var(--line); border-radius:14px; background:linear-gradient(145deg,#111827,#0f172a); } .engine b { display:block; margin-bottom:12px; } .state { color:#4ade80; font-size:.9rem; } .state.down { color:#fb7185; } .latency { float:right; color:var(--muted); font-size:.82rem; }
-  .links { margin-top:28px; padding-top:24px; border-top:1px solid var(--line); color:var(--muted); } code { color:#c4b5fd; } @media(max-width:620px){.search{flex-wrap:wrap}.search input{flex-basis:100%}.search button,.search select{height:42px}.search button{flex:1}}
+  :root { color-scheme: light; --bg:#f6f7f9; --panel:#fff; --line:#e2e5e9; --text:#202124; --muted:#6b7280; --accent:#315efb; }
+  * { box-sizing:border-box; } body { margin:0; min-height:100vh; font-family:Arial,Helvetica,sans-serif; color:var(--text); background:var(--bg); }
+  .wrap { max-width:1000px; margin:0 auto; padding:0 24px 42px; } .hero { padding:28px 0 46px; text-align:center; }
+  .logo { display:inline-flex; align-items:center; gap:9px; font-size:.95rem; font-weight:700; letter-spacing:.08em; color:#30343b; } .logo i { display:grid; place-items:center; width:28px; height:28px; border-radius:7px; background:var(--accent); color:#fff; font-style:normal; font-size:1rem; }
+  h1 { margin:60px 0 10px; font-size:clamp(2rem,5vw,3.2rem); letter-spacing:-.04em; line-height:1.1; } .lead { margin:0 auto; max-width:520px; color:var(--muted); line-height:1.5; }
+  .search { display:flex; max-width:760px; margin:28px auto 0; padding:5px; gap:5px; border:1px solid #cfd4dc; border-radius:9px; background:var(--panel); box-shadow:0 2px 8px #17203312; }
+  input,select,button { border:0; border-radius:6px; font:inherit; } input { flex:1; min-width:0; padding:12px 13px; outline:none; color:var(--text); } select { padding:0 9px; color:#4b5563; background:#f1f3f5; } button { padding:0 20px; color:#fff; cursor:pointer; background:var(--accent); font-weight:600; }
+  .summary { display:flex; justify-content:space-between; align-items:center; gap:16px; margin:0 0 12px; padding:13px 16px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--muted); font-size:.9rem; } .summary strong { color:var(--text); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; } .engine { padding:15px 16px; border:1px solid var(--line); border-radius:8px; background:var(--panel); } .engine b { display:block; margin-bottom:10px; font-size:.95rem; } .state { color:#16803c; font-size:.88rem; } .state.down { color:#c62828; } .latency { float:right; color:var(--muted); font-size:.8rem; }
+  .links { margin-top:26px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:.9rem; } code { color:#4057a8; } @media(max-width:620px){.search{flex-wrap:wrap}.search input{flex-basis:100%; border-bottom:1px solid var(--line)}.search button,.search select{height:40px}.search button{flex:1}}
 </style>
 </head>
 <body>
-  <main class="wrap"><section class="hero"><div class="logo"><i>A</i> ARTADO PROXY</div><h1>Aramanız,<br><span style="color:#a78bfa">daha özgür.</span></h1><p class="lead">Farklı arama kaynaklarını tek bir hızlı ve gizlilik odaklı API'de birleştirin.</p><form class="search" action="/api" method="get"><input name="q" placeholder="Ne aramak istersiniz?" autofocus><select name="source"><option value="all">Tüm motorlar</option><option value="cse">Google CSE</option><option value="google">Google</option><option value="yandex">Yandex TR</option></select><select name="sort"><option value="relevance">Alaka</option><option value="random">Rastgele</option></select><button type="submit">Ara</button></form></section><section><div class="summary"><span><strong>Motor durumu</strong> · Canlı bağlantı kontrolü</span><span>${allOk ? "● Tümü aktif" : "● Bazı motorlar sorunlu"}</span></div><div class="grid">${statuses.map(s => `<article class="engine"><b>${s.name}</b><span class="state ${s.ok ? "" : "down"}">${s.ok ? "● Çalışıyor" : "● Hata"}</span><span class="latency">${s.latencyMs} ms</span></article>`).join("")}</div><div class="links"><strong>API uç noktaları</strong><p><code>GET /api?q=...&number=10&source=all&sort=relevance</code></p><p>Desteklenen sıralama: <code>relevance</code> (varsayılan) veya <code>random</code>.</p></div>
+  <main class="wrap"><section class="hero"><div class="logo"><i>A</i> ARTADO PROXY</div><h1>Web'de arayın.</h1><p class="lead">Hızlı, sade ve gizlilik odaklı arama.</p><form class="search" action="/api" method="get"><input name="q" placeholder="Aramak istediğinizi yazın" autofocus><select name="source"><option value="all">Tüm motorlar</option><option value="google">Google</option><option value="yandex">Yandex TR</option></select><select name="sort"><option value="relevance">Alaka</option><option value="random">Rastgele</option></select><button type="submit">Ara</button></form></section><section><div class="summary"><span><strong>Motor durumu</strong> · Canlı bağlantı kontrolü</span><span>${allOk ? "● Tümü aktif" : "● Bazı motorlar sorunlu"}</span></div><div class="grid">${statuses.map(s => `<article class="engine"><b>${s.name}</b><span class="state ${s.ok ? "" : "down"}">${s.ok ? "● Çalışıyor" : "● Hata"}</span><span class="latency">${s.latencyMs} ms</span></article>`).join("")}</div><div class="links"><strong>API uç noktaları</strong><p><code>GET /api?q=...&number=10&source=all&sort=relevance</code></p><p>Desteklenen sıralama: <code>relevance</code> (varsayılan) veya <code>random</code>.</p></div>
     </div>
   </section></main>
 </body>
@@ -663,25 +542,20 @@ app.get("/api", async (req, res) => {
             case "google":
                 results = await getGoogle(query, n);
                 break;
-            case "cse":
-            case "google-cse":
-                results = await getGoogleCse(query, n);
-                break;
             case "yandex":
             case "turkey":
                 results = await getYandex(query, n);
                 break;
             case "all": {
-                const [google, cse, yandex] = await Promise.all([
+                const [google, yandex] = await Promise.all([
                     getGoogle(query, n),
-                    getGoogleCse(query, n),
                     getYandex(query, n)
                 ]);
-                results = mergeResults(mergeResults(google, cse), yandex);
+                results = mergeResults(google, yandex);
                 break;
             }
             default:
-                return res.status(400).json({ error: "Invalid source. Use google, cse, yandex, turkey or all." });
+                return res.status(400).json({ error: "Invalid source. Use google, yandex, turkey or all." });
         }
 
         res.setHeader('Content-Type', 'application/json; charset=UTF-8');
