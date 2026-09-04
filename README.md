@@ -70,7 +70,7 @@ Artado Proxy is an API that allows users to search the web more privately by sen
 ### Web Search — `GET /api`
 
 ```
-http://localhost:3000/api?q={query}&number={count}&source={source}
+http://localhost:3000/api?q={query}&number={count}&source={source}&sort={sort}
 ```
 
 | Parameter | Required | Description |
@@ -78,6 +78,7 @@ http://localhost:3000/api?q={query}&number={count}&source={source}
 | `q` | ✅ | Search query |
 | `number` | ✅ | Number of results (1–50) |
 | `source` | ✅ | `google`, `cse`/`google-cse`, `yandex`/`turkey`, or `all` |
+| `sort` | ❌ | `relevance` (default) or `random` |
 
 **Example:**
 ```

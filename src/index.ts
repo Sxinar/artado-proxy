@@ -7,6 +7,7 @@ import { Results, ImageResult, NewsResult, VideoResult } from "./results";
 import * as iconv from 'iconv-lite';
 import * as http from 'http';
 import * as https from 'https';
+import { randomInt } from 'crypto';
 
 const rateLimit = require('express-rate-limit');
 
@@ -227,10 +228,11 @@ async function getGoogleCseToken(): Promise<string> {
         return googleCseToken.value;
     }
 
-    const script = await requestWithRetry<string>(() => httpClient.get(
+    const response = await httpClient.get<string>(
         "https://cse.google.com/cse.js",
-        { params: { cx: GOOGLE_CSE_ID }, headers: REQUEST_HEADERS }
-    ));
+        { params: { cx: GOOGLE_CSE_ID }, headers: REQUEST_HEADERS, timeout: 2500 }
+    );
+    const script = response.data;
     const tokenMatch = script.match(/"cse_token"\s*:\s*"([^"]+)"/);
     if (!tokenMatch?.[1]) {
         throw new Error("Google CSE token was not found");
@@ -258,12 +260,14 @@ async function getGoogleCse(q: string, n: number): Promise<Results[]> {
                 rsz: "filtered_cse",
                 num: limit,
                 hl: "tr",
+                key: "notsupplied",
+                v: "1",
                 source: "gcsc",
                 gss: ".com",
                 cselibv: GOOGLE_CSE_LIB_VERSION,
                 q,
                 cx: GOOGLE_CSE_ID,
-                cse_token: await getGoogleCseToken(),
+                cse_tok: await getGoogleCseToken(),
                 safe: "off",
                 exp: GOOGLE_CSE_EXPERIMENTS.join()
             };
@@ -273,7 +277,12 @@ async function getGoogleCse(q: string, n: number): Promise<Results[]> {
                 : "https://cse.google.com/cse/element/v1",
             {
                 params,
-                headers: { ...REQUEST_HEADERS, Accept: "application/json" },
+                headers: {
+                    ...REQUEST_HEADERS,
+                    Accept: "application/json",
+                    Referer: "https://cse.google.com/",
+                    Origin: "https://cse.google.com"
+                },
                 timeout: 3000
             }
         );
@@ -363,6 +372,29 @@ function mergeResults(a: Results[], b: Results[]): Results[] {
     for (const item of a) map.set(item.title, item);
     for (const item of b) if (!map.has(item.title)) map.set(item.title, item);
     return Array.from(map.values());
+}
+
+type ResultSort = "relevance" | "random";
+
+function sortResults(results: Results[], query: string, sort: ResultSort): Results[] {
+    if (sort === "random") {
+        const shuffled = [...results];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = randomInt(i + 1);
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        return shuffled;
+    }
+
+    const terms = query.toLocaleLowerCase("tr-TR").split(/\s+/).filter(Boolean);
+    const score = (result: Results): number => {
+        const title = result.title.toLocaleLowerCase("tr-TR");
+        const text = `${title} ${result.description.toLocaleLowerCase("tr-TR")}`;
+        return terms.reduce((total, term) =>
+            total + (title.includes(term) ? 5 : 0) + (text.includes(term) ? 1 : 0), 0);
+    };
+
+    return [...results].sort((a, b) => score(b) - score(a));
 }
 
 
@@ -572,48 +604,26 @@ app.get("/", async (req, res) => {
 <html lang="tr">
 <head>
 <meta charset="utf-8">
-<title>Artado Proxy — Motor Durumu</title>
+<title>Artado Proxy — Hızlı ve Özel Arama</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 2rem; background: #0f1115; color: #e6e8eb; }
-  .card { max-width: 720px; margin: 0 auto; background: #181b22; border: 1px solid #262a33; border-radius: 12px; padding: 1.5rem 2rem; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
-  h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
-  .sub { color: #98a0ad; margin-bottom: 1.5rem; font-size: .9rem; }
-  .summary { padding: .6rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-weight: 600; }
-  .summary.ok { background: #0f3320; color: #4ade80; border: 1px solid #1f5a37; }
-  .summary.down { background: #3a1414; color: #f87171; border: 1px solid #5a1f1f; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: .65rem .5rem; border-bottom: 1px solid #262a33; }
-  th { color: #98a0ad; font-weight: 500; font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; }
-  .badge { padding: .15rem .55rem; border-radius: 999px; font-size: .8rem; font-weight: 600; }
-  .badge.ok { background: #0f3320; color: #4ade80; }
-  .badge.down { background: #3a1414; color: #f87171; }
-  .endpoints { margin-top: 1.5rem; font-size: .9rem; }
-  .endpoints code { background: #0f1115; padding: .15rem .4rem; border-radius: 4px; color: #93c5fd; }
-  a { color: #93c5fd; }
+  :root { color-scheme: dark; --bg:#080b14; --panel:#111827; --line:#243047; --muted:#94a3b8; --accent:#8b5cf6; --cyan:#22d3ee; }
+  * { box-sizing: border-box; } body { margin:0; min-height:100vh; font-family:Inter,ui-sans-serif,Segoe UI,sans-serif; color:#f8fafc; background:radial-gradient(circle at 15% 0%,#1e1b4b 0,transparent 38%),var(--bg); }
+  .wrap { max-width:1060px; margin:0 auto; padding:56px 22px 36px; } .hero { text-align:center; padding:38px 0 48px; }
+  .logo { display:inline-flex; align-items:center; gap:10px; font-weight:800; letter-spacing:-.04em; font-size:1.05rem; color:#c4b5fd; }
+  .logo i { width:34px; height:34px; display:grid; place-items:center; border-radius:11px; background:linear-gradient(135deg,var(--accent),var(--cyan)); color:white; font-style:normal; }
+  h1 { margin:18px 0 10px; font-size:clamp(2.2rem,6vw,4.5rem); letter-spacing:-.07em; line-height:1; } .lead { margin:0 auto; max-width:560px; color:var(--muted); font-size:1.05rem; }
+  .search { margin:30px auto 0; max-width:700px; display:flex; gap:10px; padding:8px; border:1px solid #384362; background:#111827cc; border-radius:16px; box-shadow:0 14px 50px #0005; }
+  input,select,button { border:0; border-radius:10px; font:inherit; } input { flex:1; min-width:0; padding:13px 14px; color:white; background:transparent; outline:none; } select { padding:0 10px; color:#cbd5e1; background:#1e293b; } button { padding:0 20px; color:white; cursor:pointer; background:linear-gradient(135deg,var(--accent),#6366f1); font-weight:700; }
+  .summary { display:flex; justify-content:space-between; gap:16px; align-items:center; margin:0 0 16px; padding:15px 18px; border:1px solid var(--line); border-radius:14px; background:#111827cc; color:#cbd5e1; } .summary strong { color:white; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; } .engine { padding:17px; border:1px solid var(--line); border-radius:14px; background:linear-gradient(145deg,#111827,#0f172a); } .engine b { display:block; margin-bottom:12px; } .state { color:#4ade80; font-size:.9rem; } .state.down { color:#fb7185; } .latency { float:right; color:var(--muted); font-size:.82rem; }
+  .links { margin-top:28px; padding-top:24px; border-top:1px solid var(--line); color:var(--muted); } code { color:#c4b5fd; } @media(max-width:620px){.search{flex-wrap:wrap}.search input{flex-basis:100%}.search button,.search select{height:42px}.search button{flex:1}}
 </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Artado Proxy</h1>
-    <div class="sub">Arama motoru proxy hizmeti — motor durumu</div>
-    <div class="summary ${allOk ? "ok" : "down"}">${allOk ? "✓ Tüm motorlar çalışıyor" : "⚠ Bazı motorlarda sorun var"}</div>
-    <table>
-      <thead><tr><th>Motor</th><th>Durum</th><th>Yanıt Süresi</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <div class="endpoints">
-      <strong>API uç noktaları:</strong>
-      <ul>
-        <li><code>GET /api?q=...&number=10&source=google|cse|yandex|all</code></li>
-        <li><code>GET /api/images?q=...&number=10</code></li>
-        <li><code>GET /api/news?q=...&number=10</code></li>
-        <li><code>GET /api/videos?q=...&number=10</code></li>
-        <li><code>GET /status</code> — servis yük durumu</li>
-      </ul>
+  <main class="wrap"><section class="hero"><div class="logo"><i>A</i> ARTADO PROXY</div><h1>Aramanız,<br><span style="color:#a78bfa">daha özgür.</span></h1><p class="lead">Farklı arama kaynaklarını tek bir hızlı ve gizlilik odaklı API'de birleştirin.</p><form class="search" action="/api" method="get"><input name="q" placeholder="Ne aramak istersiniz?" autofocus><select name="source"><option value="all">Tüm motorlar</option><option value="cse">Google CSE</option><option value="google">Google</option><option value="yandex">Yandex TR</option></select><select name="sort"><option value="relevance">Alaka</option><option value="random">Rastgele</option></select><button type="submit">Ara</button></form></section><section><div class="summary"><span><strong>Motor durumu</strong> · Canlı bağlantı kontrolü</span><span>${allOk ? "● Tümü aktif" : "● Bazı motorlar sorunlu"}</span></div><div class="grid">${statuses.map(s => `<article class="engine"><b>${s.name}</b><span class="state ${s.ok ? "" : "down"}">${s.ok ? "● Çalışıyor" : "● Hata"}</span><span class="latency">${s.latencyMs} ms</span></article>`).join("")}</div><div class="links"><strong>API uç noktaları</strong><p><code>GET /api?q=...&number=10&source=all&sort=relevance</code></p><p>Desteklenen sıralama: <code>relevance</code> (varsayılan) veya <code>random</code>.</p></div>
     </div>
-  </div>
+  </section></main>
 </body>
 </html>`;
         res.setHeader("Content-Type", "text/html; charset=UTF-8");
@@ -636,6 +646,8 @@ app.get("/api", async (req, res) => {
 
         const querysource = req.query.source as string;
         const source = (querysource || "").toLowerCase();
+        const requestedSort = String(req.query.sort || "relevance").toLowerCase();
+        const sort: ResultSort = requestedSort === "random" ? "random" : "relevance";
 
         if (!source) {
             return res.status(400).json({ error: "Missing required parameter: source" });
@@ -673,7 +685,7 @@ app.get("/api", async (req, res) => {
         }
 
         res.setHeader('Content-Type', 'application/json; charset=UTF-8');
-        return res.status(200).json(results);
+        return res.status(200).json(sortResults(results, query.trim(), sort));
     } catch (error) {
         console.error(error);
         return res.status(500).send("Internal Server Error");
